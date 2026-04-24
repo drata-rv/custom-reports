@@ -9,12 +9,12 @@ Requirements (install via pip):
     pip install requests python-docx matplotlib
 
 Basic usage:
-    python report_generator.py --token <API_TOKEN> --quarter 1 --year 2026 --company "Suncoast"
+    python report_generator.py --token <API_TOKEN> --quarter 1 --year 2026 --company "COMPANY"
 
 Full usage:
     python report_generator.py ^
         --token  <API_TOKEN>       ^
-        --company "Suncoast"       ^
+        --company "COMPANY"       ^
         --framework "CIS 8"        ^
         --quarter 1                ^
         --year 2026                ^
