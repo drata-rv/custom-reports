@@ -9,12 +9,12 @@ Requirements (install via pip):
     pip install requests python-docx matplotlib
 
 Basic usage:
-    python report_generator.py --token <API_TOKEN> --quarter 1 --year 2026 --company "COMPANY"
+    python report_generator.py --token <API_TOKEN> --quarter 1 --year 2026 --company "Suncoast"
 
 Full usage:
     python report_generator.py ^
         --token  <API_TOKEN>       ^
-        --company "COMPANY"       ^
+        --company "Suncoast"       ^
         --framework "CIS 8"        ^
         --quarter 1                ^
         --year 2026                ^
@@ -49,10 +49,16 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 # Global constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-API_BASE        = "https://public-api.drata.com/public"
 PAGE_SIZE       = 50        # confirmed safe limit for this API
 REQUEST_TIMEOUT = 30        # seconds per HTTP request
 MAX_RETRIES     = 3         # attempts before giving up on a request
+
+# Regional base URLs — use --region to select the right one for the workspace
+REGION_URLS = {
+    "us":   "https://public-api.drata.com/public",
+    "eu":   "https://public-api.eu.drata.com/public",
+    "apac": "https://public-api.apac.drata.com/public",
+}
 
 # Document styling — colours match the template's steel-blue headings
 HEADING_COLOR = RGBColor(0x1B, 0x5E, 0x8A)
@@ -92,7 +98,8 @@ class DrataClient:
     flat list regardless of how many pages the API returns.
     """
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, base_url: str = REGION_URLS["us"]) -> None:
+        self._base_url = base_url.rstrip("/")
         self._session = requests.Session()
         self._session.headers.update({
             "Authorization": f"Bearer {token}",
@@ -102,7 +109,7 @@ class DrataClient:
     # ── Low-level request ────────────────────────────────────────────────────
 
     def _get(self, endpoint: str, params: dict) -> dict:
-        url = f"{API_BASE}/{endpoint}"
+        url = f"{self._base_url}/{endpoint}"
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 resp = self._session.get(url, params=params, timeout=REQUEST_TIMEOUT)
@@ -183,13 +190,19 @@ class DrataClient:
     def get_monitors(self) -> List[dict]:
         return self._paginate("monitors")
 
-    def validate_token(self) -> bool:
-        """Return True if the token is accepted by the API."""
-        try:
-            data = self._get("controls", {"limit": 1, "page": 1})
-            return "data" in data
-        except DrataAPIError:
-            return False
+    def validate_token(self) -> None:
+        """
+        Check that the token works against the configured regional endpoint.
+        Raises DrataAPIError with the specific failure reason if anything is wrong,
+        so callers always see the real error rather than a generic message.
+        """
+        data = self._get("controls", {"limit": 1, "page": 1})
+        if "data" not in data:
+            raise DrataAPIError(
+                f"Unexpected response from /public/controls "
+                f"(got keys: {list(data.keys())}). "
+                f"The API may have changed or the token may lack Controls read permission."
+            )
 
 
 def _progress(msg: str) -> None:
@@ -824,6 +837,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output .docx path. Default: "
              "GRC_Summary_<Company>_Q<N>_<Year>.docx in the current directory.",
     )
+    parser.add_argument(
+        "--region", default="us", choices=["us", "eu", "apac"],
+        help=(
+            "Drata regional endpoint to use (default: us). "
+            "Match this to where the workspace was provisioned: "
+            "us=public-api.drata.com, "
+            "eu=public-api.eu.drata.com, "
+            "apac=public-api.apac.drata.com"
+        ),
+    )
     return parser
 
 
@@ -843,17 +866,18 @@ def main() -> None:
     print()
 
     # ── Validate token ───────────────────────────────────────────────────────
-    client = DrataClient(args.token)
+    base_url = REGION_URLS[args.region]
+    client   = DrataClient(args.token, base_url=base_url)
+    print(f"  Region    : {args.region.upper()} ({base_url})")
+    print()
     print("Validating API token...", end=" ", flush=True)
-    if not client.validate_token():
+    try:
+        client.validate_token()
+        print("OK")
+    except DrataAPIError as exc:
         print("FAILED")
-        print(
-            "ERROR: Token validation failed. "
-            "Verify the value passed to --token.",
-            file=sys.stderr,
-        )
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
-    print("OK")
 
     # ── Fetch data ───────────────────────────────────────────────────────────
     print("\nFetching data from Drata API:")
