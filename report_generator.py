@@ -157,13 +157,32 @@ class DrataClient:
     flat list regardless of how many pages the API returns.
     """
 
-    def __init__(self, token: str, base_url: str = BASE_URL) -> None:
+    def __init__(
+        self,
+        token: str,
+        base_url: str = BASE_URL,
+        verify_ssl: bool = True,
+        proxy: Optional[str] = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._session = requests.Session()
         self._session.headers.update({
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
         })
+        # Don't auto-detect proxy settings from the Windows registry / env vars.
+        # On corporate Windows machines requests picks up IE/WinINet proxy settings
+        # which can block outbound calls that work fine in PowerShell.
+        # The Drata API is reachable directly; we don't need a proxy.
+        self._session.trust_env = False
+        # SSL verification — set False only when corporate proxy does SSL inspection
+        self._session.verify = verify_ssl
+        if not verify_ssl:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        # Explicit proxy (http/https) — overrides env-var proxy settings
+        if proxy:
+            self._session.proxies = {"http": proxy, "https": proxy}
 
     # ── Low-level request ────────────────────────────────────────────────────
 
@@ -172,11 +191,27 @@ class DrataClient:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 resp = self._session.get(url, params=params, timeout=REQUEST_TIMEOUT)
-            except requests.exceptions.ConnectionError:
+            except requests.exceptions.SSLError as exc:
                 if attempt == MAX_RETRIES:
                     raise DrataAPIError(
-                        "Cannot reach the Drata API. "
-                        "Check your internet connection and try again."
+                        f"SSL certificate verification failed connecting to {url}.\n"
+                        f"  Detail: {exc}\n\n"
+                        f"  This is common on corporate networks that inspect HTTPS traffic.\n"
+                        f"  Re-run with --insecure to bypass SSL verification, or use\n"
+                        f"  --proxy http://your-corporate-proxy:port to route through a proxy."
+                    )
+                time.sleep(attempt * 2.0)
+                continue
+            except requests.exceptions.ConnectionError as exc:
+                if attempt == MAX_RETRIES:
+                    raise DrataAPIError(
+                        f"Cannot connect to {url}.\n"
+                        f"  Detail: {exc}\n\n"
+                        f"  Possible causes:\n"
+                        f"  - Corporate firewall blocking outbound HTTPS\n"
+                        f"  - SSL inspection proxy (try --insecure)\n"
+                        f"  - Proxy required (try --proxy http://proxy:port)\n"
+                        f"  - No internet access from this machine"
                     )
                 time.sleep(attempt * 2.0)
                 continue
@@ -920,6 +955,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output .docx path. Default: "
              "GRC_Summary_<Company>_Q<N>_<Year>.docx in the current directory.",
     )
+    parser.add_argument(
+        "--insecure", action="store_true", default=False,
+        help=(
+            "Disable SSL certificate verification. Use this when running on a "
+            "corporate network that performs SSL inspection (the proxy presents "
+            "its own certificate which Python does not trust by default)."
+        ),
+    )
+    parser.add_argument(
+        "--proxy", default=None, metavar="URL",
+        help=(
+            "HTTP/HTTPS proxy URL to route API calls through, e.g. "
+            "http://proxy.corp.example.com:8080. "
+            "Only needed if your network requires an explicit proxy."
+        ),
+    )
     return parser
 
 
@@ -940,7 +991,17 @@ def main() -> None:
     print()
 
     # ── Validate token ───────────────────────────────────────────────────────
-    client = DrataClient(args.token)
+    if args.insecure:
+        print("  WARNING   : SSL verification disabled (--insecure)")
+    if args.proxy:
+        print(f"  Proxy     : {args.proxy}")
+    print()
+
+    client = DrataClient(
+        args.token,
+        verify_ssl=not args.insecure,
+        proxy=args.proxy,
+    )
     print("Validating API token...", end=" ", flush=True)
     try:
         client.validate_token()
