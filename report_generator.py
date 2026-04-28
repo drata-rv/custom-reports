@@ -20,6 +20,12 @@ Full usage:
         --year 2026                ^
         --cis-range "1-18"         ^
         --output "Report_Q1.docx"
+
+Supported --framework values (case-sensitive):
+    "CIS 8", "SOC 2", "ISO 27001", "ISO 27001:2022", "HIPAA", "PCI DSS",
+    "PCI DSS v4", "GDPR", "CCPA", "NIST 800-53", "NIST CSF", "NIST CSF 2.0",
+    "CMMC", "NIST 800-171", "FedRAMP", "HITRUST", "SOX ITGC", "DORA", ...
+    (any tag returned by the Drata API is also accepted)
 """
 
 from __future__ import annotations
@@ -53,11 +59,64 @@ PAGE_SIZE       = 50        # confirmed safe limit for this API
 REQUEST_TIMEOUT = 30        # seconds per HTTP request
 MAX_RETRIES     = 3         # attempts before giving up on a request
 
-# Regional base URLs — use --region to select the right one for the workspace
-REGION_URLS = {
-    "us":   "https://public-api.drata.com/public",
-    "eu":   "https://public-api.eu.drata.com/public",
-    "apac": "https://public-api.apac.drata.com/public",
+# Drata Public API V1 — US endpoint (the only region supported by this script)
+BASE_URL = "https://public-api.drata.com/public"
+
+# Mapping from human-readable framework names (as used with --framework and
+# as returned in control.frameworkTags[] response values) to the enum strings
+# the API's ?frameworkTags= query parameter actually accepts.
+# Source: GET /controls parameter schema in the V1 OpenAPI spec.
+FRAMEWORK_TAG_MAP: Dict[str, str] = {
+    # CIS
+    "CIS 8":             "CIS8",
+    # SOC
+    "SOC 2":             "SOC_2",
+    # ISO
+    "ISO 27001":         "ISO27001",
+    "ISO 27001:2022":    "ISO270012022",
+    "ISO 27017:2015":    "ISO270172015",
+    "ISO 27018:2019":    "ISO270182019",
+    "ISO 27018:2025":    "ISO270182025",
+    "ISO 27701":         "ISO27701",
+    "ISO 27701:2025":    "ISO277012025",
+    "ISO 42001:2023":    "ISO420012023",
+    # PCI
+    "PCI DSS":           "PCI",
+    "PCI DSS v4":        "PCI4",
+    "PCI DSS v4.0.1":    "PCI4",
+    # NIST
+    "NIST 800-53":       "NIST80053",
+    "NIST CSF":          "NISTCSF",
+    "NIST CSF 2.0":      "NISTCSF2",
+    "NIST 800-171":      "NIST800171",
+    "NIST 800-171 R3":   "NIST800171R3",
+    "NIST AI":           "NISTAI",
+    # Compliance
+    "HIPAA":             "HIPAA",
+    "GDPR":              "GDPR",
+    "CCPA":              "CCPA",
+    "CCPA 2026":         "CCPA2026",
+    "CMMC":              "CMMC",
+    "FFIEC":             "FFIEC",
+    "FedRAMP":           "FEDRAMP",
+    "FedRAMP 20x":       "FEDRAMP20X",
+    "HITRUST":           "HITRUST",
+    "SOX ITGC":          "SOX_ITGC",
+    "COBIT":             "COBIT",
+    "SCF":               "SCF",
+    "CCM":               "CCM",
+    "NIS2":              "NIS2",
+    "DORA":              "DORA",
+    "MS-SSPA":           "MSSSPA",
+    "MS-SSPA 1.1":       "MSSSPA11",
+    "Cyber Essentials":  "CYBER_ESSENTIALS",
+    "Cyber Essentials 3.2": "CYBER_ESSENTIALS_32",
+    "Essential Eight":   "ESSENTIAL_EIGHT",
+    "NYDFS":             "NYDFS",
+    "TISAX":             "TISAX",
+    "CPS 230":           "CPS230",
+    "Drata Essentials":  "DRATA_ESSENTIALS",
+    "Custom":            "CUSTOM",
 }
 
 # Document styling — colours match the template's steel-blue headings
@@ -98,7 +157,7 @@ class DrataClient:
     flat list regardless of how many pages the API returns.
     """
 
-    def __init__(self, token: str, base_url: str = REGION_URLS["us"]) -> None:
+    def __init__(self, token: str, base_url: str = BASE_URL) -> None:
         self._base_url = base_url.rstrip("/")
         self._session = requests.Session()
         self._session.headers.update({
@@ -160,14 +219,18 @@ class DrataClient:
 
     # ── Pagination helper ────────────────────────────────────────────────────
 
-    def _paginate(self, endpoint: str) -> List[dict]:
+    def _paginate(
+        self, endpoint: str, extra_params: Optional[Dict[str, str]] = None
+    ) -> List[dict]:
         results: List[dict] = []
         page    = 1
         total   = 0
+        base    = extra_params.copy() if extra_params else {}
 
         while True:
-            data  = self._get(endpoint, {"limit": PAGE_SIZE, "page": page})
-            batch = data.get("data", [])
+            params = {**base, "limit": PAGE_SIZE, "page": page}
+            data   = self._get(endpoint, params)
+            batch  = data.get("data", [])
 
             if page == 1:
                 total = data.get("total", 0)
@@ -184,15 +247,35 @@ class DrataClient:
 
     # ── Public methods ───────────────────────────────────────────────────────
 
-    def get_controls(self) -> List[dict]:
-        return self._paginate("controls")
+    def get_controls(self, framework_tag: Optional[str] = None) -> List[dict]:
+        """
+        Fetch all controls, optionally filtered server-side by framework.
+
+        `framework_tag` should be the human-readable name (e.g. "CIS 8").
+        It is looked up in FRAMEWORK_TAG_MAP to get the enum value the API
+        expects (e.g. "CIS8").  If the tag isn't in the map the filter is
+        skipped and all controls are fetched — the client-side filter in
+        ReportData will still narrow them down correctly.
+        """
+        extra: Dict[str, str] = {}
+        if framework_tag:
+            api_enum = FRAMEWORK_TAG_MAP.get(framework_tag)
+            if api_enum:
+                extra["frameworkTags"] = api_enum
+            else:
+                _progress(
+                    f"  Note: '{framework_tag}' not in FRAMEWORK_TAG_MAP — "
+                    f"fetching all controls and filtering client-side."
+                )
+                print()
+        return self._paginate("controls", extra_params=extra or None)
 
     def get_monitors(self) -> List[dict]:
         return self._paginate("monitors")
 
     def validate_token(self) -> None:
         """
-        Check that the token works against the configured regional endpoint.
+        Check that the token works against the Drata API endpoint.
         Raises DrataAPIError with the specific failure reason if anything is wrong,
         so callers always see the real error rather than a generic message.
         """
@@ -837,16 +920,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output .docx path. Default: "
              "GRC_Summary_<Company>_Q<N>_<Year>.docx in the current directory.",
     )
-    parser.add_argument(
-        "--region", default="us", choices=["us", "eu", "apac"],
-        help=(
-            "Drata regional endpoint to use (default: us). "
-            "Match this to where the workspace was provisioned: "
-            "us=public-api.drata.com, "
-            "eu=public-api.eu.drata.com, "
-            "apac=public-api.apac.drata.com"
-        ),
-    )
     return parser
 
 
@@ -863,13 +936,11 @@ def main() -> None:
     print(f"  Framework : {args.framework}")
     print(f"  Period    : Q{args.quarter} {args.year}")
     print(f"  Output    : {output}")
+    print(f"  API       : {BASE_URL}")
     print()
 
     # ── Validate token ───────────────────────────────────────────────────────
-    base_url = REGION_URLS[args.region]
-    client   = DrataClient(args.token, base_url=base_url)
-    print(f"  Region    : {args.region.upper()} ({base_url})")
-    print()
+    client = DrataClient(args.token)
     print("Validating API token...", end=" ", flush=True)
     try:
         client.validate_token()
@@ -882,7 +953,7 @@ def main() -> None:
     # ── Fetch data ───────────────────────────────────────────────────────────
     print("\nFetching data from Drata API:")
     try:
-        controls = client.get_controls()
+        controls = client.get_controls(framework_tag=args.framework)
         print(f"  Controls fetched : {len(controls)}")
         monitors = client.get_monitors()
         print(f"  Monitors fetched : {len(monitors)}")
