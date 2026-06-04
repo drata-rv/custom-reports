@@ -4,11 +4,11 @@
 
 Custom reports need to be generated based on key metrics in the GRC program.
 
-Drata does not produce a formatted executive summary document out of the box. The data is in the platform but getting it into a deliverable format meant pulling numbers by hand every quarter and building the document manually. This script does that automatically.
+The data is in the platform but getting it into a deliverable format meant building key metrics and data through a mostly manual process. This script does that automatically.
 
 ## What It Does
 
-Connects to the Drata Public API V1, pulls controls filtered to a specific framework, pulls all monitor test results, and computes four metric categories from the raw data:
+Connects to the Drata Public API, pulls controls filtered to a specific framework, pulls all monitor test results, and computes four metric categories from the raw data:
 
 - Control status: pass, fail, pending, derived from live monitor results
 - Policy implementation: tiered from control flags (isReady, hasEvidence, isMonitored, hasOwner)
